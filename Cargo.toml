@@ -3953,6 +3953,17 @@ category = "Gizmos"
 wasm = true
 
 [[example]]
+name = "3d_gizmos_FAS"
+path = "examples/gizmos/3d_gizmos_FAS.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.3d_gizmos_FAS]
+name = "3D Gizmos FAS"
+description = "A scene showcasing 3D gizmos with my edits"
+category = "Gizmos"
+wasm = true
+
+[[example]]
 name = "axes"
 path = "examples/gizmos/axes.rs"
 doc-scrape-examples = true
