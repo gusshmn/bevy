@@ -4,6 +4,7 @@ pub mod entity_command;
 #[cfg(feature = "std")]
 mod parallel_scope;
 
+use bevy_ptr::move_as_ptr;
 pub use command::Command;
 pub use entity_command::EntityCommand;
 
@@ -20,8 +21,9 @@ use crate::{
     component::{Component, ComponentId, Mutable},
     entity::{Entities, Entity, EntityClonerBuilder, EntityDoesNotExistError, OptIn, OptOut},
     error::{warn, BevyError, CommandWithEntity, ErrorContext, HandleError},
-    event::{BufferedEvent, EntityEvent, Event},
-    observer::{Observer, TriggerTargets},
+    event::{EntityEvent, Event},
+    message::Message,
+    observer::Observer,
     resource::Resource,
     schedule::ScheduleLabel,
     system::{
@@ -396,6 +398,7 @@ impl<'w, 's> Commands<'w, 's> {
                 }
             });
 
+            move_as_ptr!(bundle);
             entity.insert_with_caller(
                 bundle,
                 InsertMode::Replace,
@@ -1083,38 +1086,35 @@ impl<'w, 's> Commands<'w, 's> {
         self.queue(command::run_system_cached_with(system, input).handle_error_with(warn));
     }
 
-    /// Sends a global [`Event`] without any targets.
+    /// Triggers the given [`Event`], which will run any [`Observer`]s watching for it.
     ///
-    /// This will run any [`Observer`] of the given [`Event`] that isn't scoped to specific targets.
-    ///
-    /// If the entity that this command targets does not exist when the command is applied,
-    /// the command will fail, possibly causing it to panic based on the default [error handler](crate::error) set.
-    ///
-    /// To queue this command with a specific handler, use [`EntityCommands::queue_handled`]
-    /// with [`entity_command::trigger(event)`](entity_command::trigger).
-    /// [`EntityCommands::queue_silenced`] may also be used to ignore the error completely.
+    /// [`Observer`]: crate::observer::Observer
     #[track_caller]
-    pub fn trigger(&mut self, event: impl Event) {
+    pub fn trigger<'a>(&mut self, event: impl Event<Trigger<'a>: Default>) {
         self.queue(command::trigger(event));
     }
 
-    /// Sends an [`EntityEvent`] for the given targets.
+    /// A deprecated alias for [`trigger`](Self::trigger) to ease migration.
     ///
-    /// This will run any [`Observer`] of the given [`EntityEvent`] watching those targets.
+    /// Instead of specifying the trigger target separately,
+    /// information about the target of the event is embedded in the data held by
+    /// the event type itself.
+    #[deprecated(since = "0.17.0", note = "Use `Commands::trigger` instead.")]
+    pub fn trigger_targets<'a>(&mut self, event: impl Event<Trigger<'a>: Default>) {
+        self.trigger(event);
+    }
+
+    /// Triggers the given [`Event`] using the given [`Trigger`], which will run any [`Observer`]s watching for it.
     ///
-    /// If the entity that this command targets does not exist when the command is applied,
-    /// the command will fail, possibly causing it to panic based on the default [error handler](crate::error) set.
-    ///
-    /// To queue this command with a specific handler, use [`EntityCommands::queue_handled`]
-    /// with [`entity_command::trigger(event)`](entity_command::trigger).
-    /// [`EntityCommands::queue_silenced`] may also be used to ignore the error completely.
+    /// [`Trigger`]: crate::event::Trigger
+    /// [`Observer`]: crate::observer::Observer
     #[track_caller]
-    pub fn trigger_targets(
+    pub fn trigger_with<E: Event<Trigger<'static>: Send + Sync>>(
         &mut self,
-        event: impl EntityEvent,
-        targets: impl TriggerTargets + Send + Sync + 'static,
+        event: E,
+        trigger: E::Trigger<'static>,
     ) {
-        self.queue(command::trigger_targets(event, targets));
+        self.queue(command::trigger_with(event, trigger));
     }
 
     /// Spawns an [`Observer`] and returns the [`EntityCommands`] associated
@@ -1138,28 +1138,28 @@ impl<'w, 's> Commands<'w, 's> {
         self.spawn(Observer::new(observer))
     }
 
-    /// Writes an arbitrary [`BufferedEvent`].
+    /// Writes an arbitrary [`Message`].
     ///
-    /// This is a convenience method for writing events
-    /// without requiring an [`EventWriter`](crate::event::EventWriter).
+    /// This is a convenience method for writing messages
+    /// without requiring a [`MessageWriter`](crate::message::MessageWriter).
     ///
     /// # Performance
     ///
     /// Since this is a command, exclusive world access is used, which means that it will not profit from
     /// system-level parallelism on supported platforms.
     ///
-    /// If these events are performance-critical or very frequently sent,
-    /// consider using a typed [`EventWriter`](crate::event::EventWriter) instead.
+    /// If these messages are performance-critical or very frequently sent,
+    /// consider using a [`MessageWriter`](crate::message::MessageWriter) instead.
     #[track_caller]
-    pub fn write_event<E: BufferedEvent>(&mut self, event: E) -> &mut Self {
-        self.queue(command::write_event(event));
+    pub fn write_message<M: Message>(&mut self, message: M) -> &mut Self {
+        self.queue(command::write_message(message));
         self
     }
 
-    /// Writes an arbitrary [`BufferedEvent`].
+    /// Writes an arbitrary [`Message`].
     ///
     /// This is a convenience method for writing events
-    /// without requiring an [`EventWriter`](crate::event::EventWriter).
+    /// without requiring a [`MessageWriter`](crate::message::MessageWriter).
     ///
     /// # Performance
     ///
@@ -1167,11 +1167,11 @@ impl<'w, 's> Commands<'w, 's> {
     /// system-level parallelism on supported platforms.
     ///
     /// If these events are performance-critical or very frequently sent,
-    /// consider using a typed [`EventWriter`](crate::event::EventWriter) instead.
+    /// consider using a typed [`MessageWriter`](crate::message::MessageWriter) instead.
     #[track_caller]
-    #[deprecated(since = "0.17.0", note = "Use `Commands::write_event` instead.")]
-    pub fn send_event<E: BufferedEvent>(&mut self, event: E) -> &mut Self {
-        self.write_event(event)
+    #[deprecated(since = "0.17.0", note = "Use `Commands::write_message` instead.")]
+    pub fn send_event<E: Message>(&mut self, event: E) -> &mut Self {
+        self.write_message(event)
     }
 
     /// Runs the schedule corresponding to the given [`ScheduleLabel`].
@@ -2005,21 +2005,8 @@ impl<'a> EntityCommands<'a> {
         &mut self.commands
     }
 
-    /// Sends an [`EntityEvent`] targeting the entity.
-    ///
-    /// This will run any [`Observer`] of the given [`EntityEvent`] watching this entity.
-    ///
-    /// If the entity that this command targets does not exist when the command is applied,
-    /// the command will fail, possibly causing it to panic based on the default error handler set.
-    /// To queue this command with a handler, use [`EntityCommands::queue_handled`]
-    /// with [`entity_command::trigger(event)`](entity_command::trigger).
-    /// [`EntityCommands::queue_silenced`] may also be used to ignore the error completely.
-    #[track_caller]
-    pub fn trigger(&mut self, event: impl EntityEvent) -> &mut Self {
-        self.queue(entity_command::trigger(event))
-    }
-
-    /// Creates an [`Observer`] listening for events of type `E` targeting this entity.
+    /// Creates an [`Observer`] watching for an [`EntityEvent`] of type `E` whose [`EntityEvent::event_target`]
+    /// targets this entity.
     pub fn observe<E: EntityEvent, B: Bundle, M>(
         &mut self,
         observer: impl IntoObserverSystem<E, B, M>,
@@ -2271,6 +2258,53 @@ impl<'a> EntityCommands<'a> {
     pub fn move_components<B: Bundle>(&mut self, target: Entity) -> &mut Self {
         self.queue(entity_command::move_components::<B>(target))
     }
+
+    /// Passes the current entity into the given function, and triggers the [`EntityEvent`] returned by that function.
+    ///
+    /// # Example
+    ///
+    /// A surprising number of functions meet the trait bounds for `event_fn`:
+    ///
+    /// ```rust
+    /// # use bevy_ecs::prelude::*;
+    ///
+    /// #[derive(EntityEvent)]
+    /// struct Explode(Entity);
+    ///
+    /// impl From<Entity> for Explode {
+    ///    fn from(entity: Entity) -> Self {
+    ///       Explode(entity)
+    ///    }
+    /// }
+    ///
+    ///
+    /// fn trigger_via_constructor(mut commands: Commands) {
+    ///     // The fact that `Epxlode` is a single-field tuple struct
+    ///     // ensures that `Explode(entity)` is a function that generates
+    ///     // an EntityEvent, meeting the trait bounds for `event_fn`.
+    ///     commands.spawn_empty().trigger(Explode);
+    ///
+    /// }
+    ///
+    ///
+    /// fn trigger_via_from_trait(mut commands: Commands) {
+    ///     // This variant also works for events like `struct Explode { entity: Entity }`
+    ///     commands.spawn_empty().trigger(Explode::from);
+    /// }
+    ///
+    /// fn trigger_via_closure(mut commands: Commands) {
+    ///     commands.spawn_empty().trigger(|entity| Explode(entity));
+    /// }
+    /// ```
+    #[track_caller]
+    pub fn trigger<'t, E: EntityEvent<Trigger<'t>: Default>>(
+        &mut self,
+        event_fn: impl FnOnce(Entity) -> E,
+    ) -> &mut Self {
+        let event = (event_fn)(self.entity);
+        self.commands.trigger(event);
+        self
+    }
 }
 
 /// A wrapper around [`EntityCommands`] with convenience methods for working with a specified component type.
@@ -2443,8 +2477,11 @@ mod tests {
         }
     }
 
-    #[derive(Component, Resource)]
+    #[derive(Component)]
     struct W<T>(T);
+
+    #[derive(Resource)]
+    struct V<T>(T);
 
     fn simple_command(world: &mut World) {
         world.spawn((W(0u32), W(42u64)));
@@ -2452,7 +2489,7 @@ mod tests {
 
     impl FromWorld for W<String> {
         fn from_world(world: &mut World) -> Self {
-            let v = world.resource::<W<usize>>();
+            let v = world.resource::<V<usize>>();
             Self("*".repeat(v.0))
         }
     }
@@ -2493,7 +2530,7 @@ mod tests {
             .or_insert(W(42));
         queue.apply(&mut world);
         assert_eq!(42, world.get::<W<u64>>(entity).unwrap().0);
-        world.insert_resource(W(5_usize));
+        world.insert_resource(V(5_usize));
         let mut commands = Commands::new(&mut queue, &world);
         commands.entity(entity).entry::<W<String>>().or_from_world();
         queue.apply(&mut world);
@@ -2710,22 +2747,22 @@ mod tests {
         let mut queue = CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            commands.insert_resource(W(123i32));
-            commands.insert_resource(W(456.0f64));
+            commands.insert_resource(V(123i32));
+            commands.insert_resource(V(456.0f64));
         }
 
         queue.apply(&mut world);
-        assert!(world.contains_resource::<W<i32>>());
-        assert!(world.contains_resource::<W<f64>>());
+        assert!(world.contains_resource::<V<i32>>());
+        assert!(world.contains_resource::<V<f64>>());
 
         {
             let mut commands = Commands::new(&mut queue, &world);
             // test resource removal
-            commands.remove_resource::<W<i32>>();
+            commands.remove_resource::<V<i32>>();
         }
         queue.apply(&mut world);
-        assert!(!world.contains_resource::<W<i32>>());
-        assert!(world.contains_resource::<W<f64>>());
+        assert!(!world.contains_resource::<V<i32>>());
+        assert!(world.contains_resource::<V<f64>>());
     }
 
     #[test]
@@ -2798,17 +2835,17 @@ mod tests {
         let mut queue_1 = CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue_1, &world);
-            commands.insert_resource(W(123i32));
+            commands.insert_resource(V(123i32));
         }
         let mut queue_2 = CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue_2, &world);
-            commands.insert_resource(W(456.0f64));
+            commands.insert_resource(V(456.0f64));
         }
         queue_1.append(&mut queue_2);
         queue_1.apply(&mut world);
-        assert!(world.contains_resource::<W<i32>>());
-        assert!(world.contains_resource::<W<f64>>());
+        assert!(world.contains_resource::<V<i32>>());
+        assert!(world.contains_resource::<V<f64>>());
     }
 
     #[test]
@@ -2820,7 +2857,7 @@ mod tests {
         world.flush();
         assert_eq!(
             Some(expected),
-            world.entities().entity_get_spawned_or_despawned_at(id)
+            world.entities().entity_get_spawn_or_despawn_tick(id)
         );
     }
 }

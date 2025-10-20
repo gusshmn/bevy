@@ -1,7 +1,7 @@
 use crate::{
     archetype::{Archetype, Archetypes},
     bundle::Bundle,
-    change_detection::{MaybeLocation, Ticks, TicksMut},
+    change_detection::{ComponentTicksMut, ComponentTicksRef, MaybeLocation},
     component::{Component, ComponentId, Components, Mutable, StorageType, Tick},
     entity::{Entities, Entity, EntityLocation},
     query::{Access, DebugCheckedUnwrap, FilteredAccess, WorldQuery},
@@ -555,7 +555,7 @@ impl ReleaseStateQueryData for EntityLocation {
 ///         print!(
 ///             "entity {:?} spawned at {:?}",
 ///             entity,
-///             spawn_details.spawned_at()
+///             spawn_details.spawn_tick()
 ///         );
 ///         match spawn_details.spawned_by().into_option() {
 ///             Some(location) => println!(" by {:?}", location),
@@ -569,7 +569,7 @@ impl ReleaseStateQueryData for EntityLocation {
 #[derive(Clone, Copy, Debug)]
 pub struct SpawnDetails {
     spawned_by: MaybeLocation,
-    spawned_at: Tick,
+    spawn_tick: Tick,
     last_run: Tick,
     this_run: Tick,
 }
@@ -578,12 +578,12 @@ impl SpawnDetails {
     /// Returns `true` if the entity spawned since the last time this system ran.
     /// Otherwise, returns `false`.
     pub fn is_spawned(self) -> bool {
-        self.spawned_at.is_newer_than(self.last_run, self.this_run)
+        self.spawn_tick.is_newer_than(self.last_run, self.this_run)
     }
 
     /// Returns the `Tick` this entity spawned at.
-    pub fn spawned_at(self) -> Tick {
-        self.spawned_at
+    pub fn spawn_tick(self) -> Tick {
+        self.spawn_tick
     }
 
     /// Returns the source code location from which this entity has been spawned.
@@ -680,14 +680,14 @@ unsafe impl QueryData for SpawnDetails {
         _table_row: TableRow,
     ) -> Self::Item<'w, 's> {
         // SAFETY: only living entities are queried
-        let (spawned_by, spawned_at) = unsafe {
+        let (spawned_by, spawn_tick) = unsafe {
             fetch
                 .entities
                 .entity_get_spawned_or_despawned_unchecked(entity)
         };
         Self {
             spawned_by,
-            spawned_at,
+            spawn_tick,
             last_run: fetch.last_run,
             this_run: fetch.this_run,
         }
@@ -1801,18 +1801,18 @@ unsafe impl<'__w, T: Component> QueryData for Ref<'__w, T> {
 
                 Ref {
                     value: component.deref(),
-                    ticks: Ticks {
+                    ticks: ComponentTicksRef {
                         added: added.deref(),
                         changed: changed.deref(),
+                        changed_by: caller.map(|caller| caller.deref()),
                         this_run: fetch.this_run,
                         last_run: fetch.last_run,
                     },
-                    changed_by: caller.map(|caller| caller.deref()),
                 }
             },
             |sparse_set| {
                 // SAFETY: The caller ensures `entity` is in range and has the component.
-                let (component, ticks, caller) = unsafe {
+                let (component, ticks) = unsafe {
                     sparse_set
                         .debug_checked_unwrap()
                         .get_with_ticks(entity)
@@ -1821,8 +1821,11 @@ unsafe impl<'__w, T: Component> QueryData for Ref<'__w, T> {
 
                 Ref {
                     value: component.deref(),
-                    ticks: Ticks::from_tick_cells(ticks, fetch.last_run, fetch.this_run),
-                    changed_by: caller.map(|caller| caller.deref()),
+                    ticks: ComponentTicksRef::from_tick_cells(
+                        ticks,
+                        fetch.last_run,
+                        fetch.this_run,
+                    ),
                 }
             },
         )
@@ -2007,18 +2010,18 @@ unsafe impl<'__w, T: Component<Mutability = Mutable>> QueryData for &'__w mut T 
 
                 Mut {
                     value: component.deref_mut(),
-                    ticks: TicksMut {
+                    ticks: ComponentTicksMut {
                         added: added.deref_mut(),
                         changed: changed.deref_mut(),
+                        changed_by: caller.map(|caller| caller.deref_mut()),
                         this_run: fetch.this_run,
                         last_run: fetch.last_run,
                     },
-                    changed_by: caller.map(|caller| caller.deref_mut()),
                 }
             },
             |sparse_set| {
                 // SAFETY: The caller ensures `entity` is in range and has the component.
-                let (component, ticks, caller) = unsafe {
+                let (component, ticks) = unsafe {
                     sparse_set
                         .debug_checked_unwrap()
                         .get_with_ticks(entity)
@@ -2027,8 +2030,11 @@ unsafe impl<'__w, T: Component<Mutability = Mutable>> QueryData for &'__w mut T 
 
                 Mut {
                     value: component.assert_unique().deref_mut(),
-                    ticks: TicksMut::from_tick_cells(ticks, fetch.last_run, fetch.this_run),
-                    changed_by: caller.map(|caller| caller.deref_mut()),
+                    ticks: ComponentTicksMut::from_tick_cells(
+                        ticks,
+                        fetch.last_run,
+                        fetch.this_run,
+                    ),
                 }
             },
         )
@@ -2530,6 +2536,7 @@ macro_rules! impl_tuple_query_data {
             }
         }
 
+        $(#[$meta])*
         /// SAFETY: each item in the tuple is read only
         unsafe impl<$($name: ReadOnlyQueryData),*> ReadOnlyQueryData for ($($name,)*) {}
 
@@ -2541,6 +2548,7 @@ macro_rules! impl_tuple_query_data {
             clippy::unused_unit,
             reason = "Zero-length tuples will generate some function bodies equivalent to `()`; however, this macro is meant for all applicable tuples, and as such it makes no sense to rewrite it just for that case."
         )]
+        $(#[$meta])*
         impl<$($name: ReleaseStateQueryData),*> ReleaseStateQueryData for ($($name,)*) {
             fn release_state<'w>(($($item,)*): Self::Item<'w, '_>) -> Self::Item<'w, 'static> {
                 ($($name::release_state($item),)*)
@@ -3034,7 +3042,7 @@ mod tests {
         struct NonReleaseQueryData;
 
         /// SAFETY:
-        /// `update_component_access` and `update_archetype_component_access` do nothing.
+        /// `update_component_access` do nothing.
         /// This is sound because `fetch` does not access components.
         unsafe impl WorldQuery for NonReleaseQueryData {
             type Fetch<'w> = ();
