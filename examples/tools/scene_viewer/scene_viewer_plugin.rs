@@ -4,8 +4,9 @@
 //! - Insert an initialized `SceneHandle` resource into your App's `AssetServer`.
 
 use bevy::{
-    camera_controller::free_cam::FreeCam, gltf::Gltf, input::common_conditions::input_just_pressed,
-    prelude::*, scene::InstanceId,
+    camera_controller::free_camera::FreeCamera,
+    gizmos::skinned_mesh_bounds::SkinnedMeshBoundsGizmoConfigGroup, gltf::Gltf,
+    input::common_conditions::input_just_pressed, prelude::*, scene::InstanceId,
 };
 
 use std::{f32::consts::*, fmt};
@@ -47,6 +48,7 @@ Scene Controls:
     L           - animate light direction
     U           - toggle shadows
     B           - toggle bounding boxes
+    J           - toggle skinned mesh joint bounding boxes
     C           - cycle through the camera controller and any cameras loaded from the scene
 
     Space       - Play/Pause animation
@@ -70,7 +72,11 @@ impl Plugin for SceneViewerPlugin {
                 (
                     update_lights,
                     camera_tracker,
-                    toggle_bounding_boxes.run_if(input_just_pressed(KeyCode::KeyB)),
+                    (
+                        toggle_bounding_boxes.run_if(input_just_pressed(KeyCode::KeyB)),
+                        toggle_skinned_mesh_bounds.run_if(input_just_pressed(KeyCode::KeyJ)),
+                    )
+                        .chain(),
                 ),
             );
     }
@@ -78,6 +84,13 @@ impl Plugin for SceneViewerPlugin {
 
 fn toggle_bounding_boxes(mut config: ResMut<GizmoConfigStore>) {
     config.config_mut::<AabbGizmoConfigGroup>().1.draw_all ^= true;
+}
+
+fn toggle_skinned_mesh_bounds(mut config: ResMut<GizmoConfigStore>) {
+    config
+        .config_mut::<SkinnedMeshBoundsGizmoConfigGroup>()
+        .1
+        .draw_all ^= true;
 }
 
 fn scene_load_check(
@@ -147,7 +160,7 @@ fn update_lights(
 ) {
     for (_, mut light) in &mut query {
         if key_input.just_pressed(KeyCode::KeyU) {
-            light.shadows_enabled = !light.shadows_enabled;
+            light.shadow_maps_enabled = !light.shadow_maps_enabled;
         }
     }
 
@@ -199,8 +212,8 @@ fn camera_tracker(
     mut camera_tracker: ResMut<CameraTracker>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut queries: ParamSet<(
-        Query<(Entity, &mut Camera), (Added<Camera>, Without<FreeCam>)>,
-        Query<(Entity, &mut Camera), (Added<Camera>, With<FreeCam>)>,
+        Query<(Entity, &mut Camera), (Added<Camera>, Without<FreeCamera>)>,
+        Query<(Entity, &mut Camera), (Added<Camera>, With<FreeCamera>)>,
         Query<&mut Camera>,
     )>,
 ) {

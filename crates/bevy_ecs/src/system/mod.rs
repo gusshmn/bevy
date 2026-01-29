@@ -418,8 +418,8 @@ mod tests {
             SystemCondition,
         },
         system::{
-            Commands, In, InMut, IntoSystem, Local, NonSend, NonSendMut, ParamSet, Query, Res,
-            ResMut, Single, StaticSystemParam, System, SystemState,
+            Commands, ExclusiveMarker, In, InMut, IntoSystem, Local, NonSend, NonSendMut, ParamSet,
+            Query, Res, ResMut, Single, StaticSystemParam, System, SystemState,
         },
         world::{DeferredWorld, EntityMut, FromWorld, World},
     };
@@ -1050,6 +1050,24 @@ mod tests {
     }
 
     #[test]
+    fn function_system_as_exclusive() {
+        let mut world = World::default();
+
+        world.insert_resource(SystemRan::No);
+
+        fn sys(_marker: ExclusiveMarker, mut system_ran: ResMut<SystemRan>) {
+            *system_ran = SystemRan::Yes;
+        }
+
+        let mut sys = IntoSystem::into_system(sys);
+        sys.initialize(&mut world);
+        assert!(sys.is_exclusive());
+
+        run_system(&mut world, sys);
+        assert_eq!(*world.resource::<SystemRan>(), SystemRan::Yes);
+    }
+
+    #[test]
     fn removal_tracking() {
         let mut world = World::new();
 
@@ -1138,7 +1156,7 @@ mod tests {
         ) {
             assert_eq!(query.iter().count(), 1, "entity exists");
             for entity in &query {
-                let location = entities.get(entity).unwrap();
+                let location = entities.get_spawned(entity).unwrap();
                 let archetype = archetypes.get(location.archetype_id).unwrap();
                 let archetype_components = archetype.components();
                 let bundle_id = bundles
@@ -1342,14 +1360,14 @@ mod tests {
     #[test]
     fn system_state_spawned() {
         let mut world = World::default();
-        world.spawn_empty();
+        world.spawn(A);
         let spawn_tick = world.change_tick();
 
-        let mut system_state: SystemState<Option<Single<SpawnDetails, Spawned>>> =
+        let mut system_state: SystemState<Option<Single<(&A, SpawnDetails), Spawned>>> =
             SystemState::new(&mut world);
         {
             let query = system_state.get(&world);
-            assert_eq!(query.unwrap().spawn_tick(), spawn_tick);
+            assert_eq!(query.unwrap().1.spawn_tick(), spawn_tick);
         }
 
         {

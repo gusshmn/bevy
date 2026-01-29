@@ -21,8 +21,9 @@ mod tests {
     use core::panic::AssertUnwindSafe;
     use std::sync::OnceLock;
 
-    use crate::component::Tick;
+    use crate::change_detection::Tick;
     use crate::lifecycle::HookContext;
+    use crate::query::QueryAccessError;
     use crate::{
         change_detection::{MaybeLocation, MutUntyped},
         component::ComponentId,
@@ -39,6 +40,9 @@ mod tests {
     #[derive(Component, Clone, Copy, Debug, PartialEq)]
     #[component(storage = "SparseSet")]
     struct TestComponent2(u32);
+
+    #[derive(Component)]
+    struct Marker;
 
     #[test]
     fn entity_ref_get_by_id() {
@@ -465,9 +469,9 @@ mod tests {
         world.register_component::<TestComponent>();
         world.register_component::<TestComponent2>();
 
-        world.spawn(TestComponent(0)).insert(TestComponent2(0));
+        world.spawn((TestComponent(0), TestComponent2(0), Marker));
 
-        let mut query = world.query::<EntityRefExcept<TestComponent>>();
+        let mut query = world.query_filtered::<EntityRefExcept<TestComponent>, With<Marker>>();
 
         let mut found = false;
         for entity_ref in query.iter_mut(&mut world) {
@@ -521,11 +525,14 @@ mod tests {
     #[test]
     fn entity_ref_except_doesnt_conflict() {
         let mut world = World::new();
-        world.spawn(TestComponent(0)).insert(TestComponent2(0));
+        world.spawn((TestComponent(0), TestComponent2(0), Marker));
 
         world.run_system_once(system).unwrap();
 
-        fn system(_: Query<&mut TestComponent>, query: Query<EntityRefExcept<TestComponent>>) {
+        fn system(
+            _: Query<&mut TestComponent, With<Marker>>,
+            query: Query<EntityRefExcept<TestComponent>, With<Marker>>,
+        ) {
             for entity_ref in query.iter() {
                 assert!(matches!(
                     entity_ref.get::<TestComponent2>(),
@@ -540,9 +547,9 @@ mod tests {
     #[test]
     fn entity_mut_except() {
         let mut world = World::new();
-        world.spawn(TestComponent(0)).insert(TestComponent2(0));
+        world.spawn((TestComponent(0), TestComponent2(0), Marker));
 
-        let mut query = world.query::<EntityMutExcept<TestComponent>>();
+        let mut query = world.query_filtered::<EntityMutExcept<TestComponent>, With<Marker>>();
 
         let mut found = false;
         for mut entity_mut in query.iter_mut(&mut world) {
@@ -603,11 +610,14 @@ mod tests {
     #[test]
     fn entity_mut_except_doesnt_conflict() {
         let mut world = World::new();
-        world.spawn(TestComponent(0)).insert(TestComponent2(0));
+        world.spawn((TestComponent(0), TestComponent2(0), Marker));
 
         world.run_system_once(system).unwrap();
 
-        fn system(_: Query<&mut TestComponent>, mut query: Query<EntityMutExcept<TestComponent>>) {
+        fn system(
+            _: Query<&mut TestComponent, With<Marker>>,
+            mut query: Query<EntityMutExcept<TestComponent>, With<Marker>>,
+        ) {
             for mut entity_mut in query.iter_mut() {
                 assert!(entity_mut
                     .get_mut::<TestComponent2>()
@@ -806,11 +816,35 @@ mod tests {
         let e3 = world.spawn_empty().id();
 
         assert_eq!(
-            Some((&X(7), &Y(10))),
+            Ok((&X(7), &Y(10))),
             world.entity(e1).get_components::<(&X, &Y)>()
         );
-        assert_eq!(None, world.entity(e2).get_components::<(&X, &Y)>());
-        assert_eq!(None, world.entity(e3).get_components::<(&X, &Y)>());
+        assert_eq!(
+            Err(QueryAccessError::EntityDoesNotMatch),
+            world.entity(e2).get_components::<(&X, &Y)>()
+        );
+        assert_eq!(
+            Err(QueryAccessError::EntityDoesNotMatch),
+            world.entity(e3).get_components::<(&X, &Y)>()
+        );
+    }
+
+    #[test]
+    fn get_components_mut() {
+        let mut world = World::default();
+        let e1 = world.spawn((X(7), Y(10))).id();
+
+        let mut entity_mut_1 = world.entity_mut(e1);
+        let Ok((mut x, mut y)) = entity_mut_1.get_components_mut::<(&mut X, &mut Y)>() else {
+            panic!("could not get components");
+        };
+        x.0 += 1;
+        y.0 += 1;
+
+        assert_eq!(
+            Ok((&X(8), &Y(11))),
+            world.entity(e1).get_components::<(&X, &Y)>()
+        );
     }
 
     #[test]
@@ -1094,7 +1128,7 @@ mod tests {
         unsafe { a.world_mut().trigger(TestEvent(entity)) }
         a.observe(|_: On<TestEvent>| {}); // this flushes commands implicitly by spawning
         let location = a.location();
-        assert_eq!(world.entities().get(entity), Some(location));
+        assert_eq!(world.entities().get(entity).unwrap(), Some(location));
     }
 
     #[test]
@@ -1127,11 +1161,15 @@ mod tests {
         world.add_observer(|_: On<Remove, TestComponent>, mut commands: Commands| {
             commands.queue(count_flush);
         });
+
+        // Spawning an empty should not flush.
         world.commands().queue(count_flush);
         let entity = world.spawn_empty().id();
-        assert_eq!(world.resource::<TestFlush>().0, 1);
+        assert_eq!(world.resource::<TestFlush>().0, 0);
+
         world.commands().queue(count_flush);
         world.flush_commands();
+
         let mut a = world.entity_mut(entity);
         assert_eq!(a.world().resource::<TestFlush>().0, 2);
         a.insert(TestComponent(0));

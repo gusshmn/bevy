@@ -35,12 +35,10 @@ extern crate core;
 // Required to make proc macros work in bevy itself.
 extern crate self as bevy_render;
 
-pub mod alpha;
 pub mod batching;
 pub mod camera;
 pub mod diagnostic;
 pub mod erased_render_asset;
-pub mod experimental;
 pub mod extract_component;
 pub mod extract_instances;
 mod extract_param;
@@ -49,10 +47,10 @@ pub mod globals;
 pub mod gpu_component_array_buffer;
 pub mod gpu_readback;
 pub mod mesh;
+pub mod occlusion_culling;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pipelined_rendering;
 pub mod render_asset;
-pub mod render_graph;
 pub mod render_phase;
 pub mod render_resource;
 pub mod renderer;
@@ -69,8 +67,8 @@ pub mod view;
 pub mod prelude {
     #[doc(hidden)]
     pub use crate::{
-        alpha::AlphaMode, camera::NormalizedRenderTargetExt as _, texture::ManualTextureViews,
-        view::Msaa, ExtractSchedule,
+        camera::NormalizedRenderTargetExt as _, texture::ManualTextureViews, view::Msaa,
+        ExtractSchedule,
     };
 }
 
@@ -81,7 +79,7 @@ use crate::{
     gpu_readback::GpuReadbackPlugin,
     mesh::{MeshRenderAssetPlugin, RenderMesh},
     render_asset::prepare_assets,
-    render_resource::{init_empty_bind_group_layout, PipelineCache},
+    render_resource::PipelineCache,
     renderer::{render_system, RenderAdapterInfo},
     settings::RenderCreation,
     storage::StoragePlugin,
@@ -102,8 +100,8 @@ use bevy_utils::prelude::default;
 use bevy_window::{PrimaryWindow, RawHandleWrapperHolder};
 use bitflags::bitflags;
 use core::ops::{Deref, DerefMut};
-use experimental::occlusion_culling::OcclusionCullingPlugin;
 use globals::GlobalsPlugin;
+use occlusion_culling::OcclusionCullingPlugin;
 use render_asset::{
     extract_render_asset_bytes_per_frame, reset_render_asset_bytes_per_frame,
     RenderAssetBytesPerFrame, RenderAssetBytesPerFrameLimiter,
@@ -193,10 +191,6 @@ pub enum RenderSystems {
     PostCleanup,
 }
 
-/// Deprecated alias for [`RenderSystems`].
-#[deprecated(since = "0.17.0", note = "Renamed to `RenderSystems`.")]
-pub type RenderSet = RenderSystems;
-
 /// The startup schedule of the [`RenderApp`]
 #[derive(ScheduleLabel, Debug, Hash, PartialEq, Eq, Clone, Default)]
 pub struct RenderStartup;
@@ -251,13 +245,13 @@ impl Render {
     }
 }
 
-/// Schedule which extract data from the main world and inserts it into the render world.
+/// Schedule in which data from the main world is 'extracted' into the render world.
 ///
 /// This step should be kept as short as possible to increase the "pipelining potential" for
 /// running the next frame while rendering the current frame.
 ///
-/// This schedule is run on the main world, but its buffers are not applied
-/// until it is returned to the render world.
+/// This schedule is run on the render world, but it also has access to the main world.
+/// See [`MainWorld`] and [`Extract`] for details on how to access main world data from this schedule.
 #[derive(ScheduleLabel, PartialEq, Eq, Debug, Clone, Hash, Default)]
 pub struct ExtractSchedule;
 
@@ -281,13 +275,6 @@ impl DerefMut for MainWorld {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
-}
-
-pub mod graph {
-    use crate::render_graph::RenderLabel;
-
-    #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-    pub struct CameraDriverLabel;
 }
 
 #[derive(Resource)]
@@ -392,8 +379,6 @@ impl Plugin for RenderPlugin {
                     Render,
                     reset_render_asset_bytes_per_frame.in_set(RenderSystems::Cleanup),
                 );
-
-            render_app.add_systems(RenderStartup, init_empty_bind_group_layout);
         }
     }
 
@@ -489,7 +474,7 @@ unsafe fn initialize_render_app(app: &mut App) {
     render_app
         .add_schedule(extract_schedule)
         .add_schedule(Render::base_schedule())
-        .init_resource::<render_graph::RenderGraph>()
+        .init_resource::<renderer::PendingCommandBuffers>()
         .insert_resource(app.world().resource::<AssetServer>().clone())
         .add_systems(ExtractSchedule, PipelineCache::extract_shaders)
         .add_systems(
@@ -520,7 +505,7 @@ unsafe fn initialize_render_app(app: &mut App) {
 
         {
             #[cfg(feature = "trace")]
-            let _stage_span = tracing::info_span!("entity_sync").entered();
+            let _stage_span = bevy_log::info_span!("entity_sync").entered();
             entity_sync_system(main_world, render_world);
         }
 

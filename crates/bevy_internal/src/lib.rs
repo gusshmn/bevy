@@ -45,7 +45,7 @@ pub use bevy_feathers as feathers;
 pub use bevy_gilrs as gilrs;
 #[cfg(feature = "bevy_gizmos")]
 pub use bevy_gizmos as gizmos;
-#[cfg(feature = "bevy_gizmos")]
+#[cfg(feature = "bevy_gizmos_render")]
 pub use bevy_gizmos_render as gizmos_render;
 #[cfg(feature = "bevy_gltf")]
 pub use bevy_gltf as gltf;
@@ -58,6 +58,8 @@ pub use bevy_input_focus as input_focus;
 pub use bevy_light as light;
 #[cfg(feature = "bevy_log")]
 pub use bevy_log as log;
+#[cfg(feature = "bevy_material")]
+pub use bevy_material as material;
 pub use bevy_math as math;
 #[cfg(feature = "bevy_mesh")]
 pub use bevy_mesh as mesh;
